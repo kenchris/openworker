@@ -217,6 +217,13 @@ or `action: block`; unknown/inconclusive responses pause enforcement. Endpoint a
 credential references are operator-owned. Neither agents nor retrieved content
 can change them.
 
+A scanner that has to follow a conversation, for example to remember that an
+earlier tool result looked like an injection, can ask for identifiers. With
+`includeCorrelation: true` (Rust: `include_correlation`) the `selectedContext`
+request also carries `sessionId`, `turnId`, `callId` and `agent`, and nothing else
+from the context. It is off by default, so the default request still identifies no
+session. The fields are additive and `schemaVersion` stays 1.
+
 ## Service configuration and optional packaging
 
 Standalone services accept operator-owned `safety` and `compliance` configuration.

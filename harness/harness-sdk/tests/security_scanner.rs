@@ -76,6 +76,7 @@ async fn exercise(managed: bool) {
             credential_env: key.clone(),
             timeout_ms: 1000,
             allow_loopback_http: true,
+            include_correlation: false,
         },
     )
     .await

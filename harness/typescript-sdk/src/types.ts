@@ -496,6 +496,8 @@ export interface SecurityAdapterConfig {
   credentialEnv: string;
   timeoutMs?: number;
   allowLoopbackHttp?: boolean;
+  /** Selected-context protocol: also send sessionId, turnId, callId and agent. Off by default. */
+  includeCorrelation?: boolean;
 }
 
 export interface ComplianceActivity {

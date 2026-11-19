@@ -29,6 +29,12 @@ pub struct Config {
     /// Development fixtures only; still limited to numeric loopback addresses.
     #[serde(default)]
     pub allow_loopback_http: bool,
+    /// Selected-context protocol only. Also send `sessionId`, `turnId`, `callId` and
+    /// `agent`, so a scanner can keep state per conversation (for example, remember that
+    /// an earlier tool result was suspicious). Off by default: the default request carries
+    /// the selected text and nothing that identifies a session.
+    #[serde(default)]
+    pub include_correlation: bool,
 }
 fn timeout() -> u64 {
     10_000
@@ -56,6 +62,7 @@ pub struct Scanner {
     protocol: Protocol,
     credential: Arc<dyn Credential>,
     timeout: Duration,
+    include_correlation: bool,
 }
 impl Scanner {
     pub fn from_environment(config: Config) -> Result<Self> {
@@ -110,6 +117,7 @@ impl Scanner {
             protocol: config.protocol,
             credential,
             timeout: Duration::from_millis(config.timeout_ms),
+            include_correlation: config.include_correlation,
         })
     }
     fn request(&self, c: &Context) -> Result<Value> {
@@ -125,7 +133,20 @@ impl Scanner {
         );
         Ok(match &self.protocol {
             Protocol::SelectedContext => {
-                json!({"schemaVersion":1,"scanId":c.evaluation_id,"phase":c.phase,"text":c.text,"tool":c.tool})
+                let mut body = json!({"schemaVersion":1,"scanId":c.evaluation_id,"phase":c.phase,"text":c.text,"tool":c.tool});
+                if self.include_correlation {
+                    // Identifiers only. The rest of `c.context` is never sent.
+                    body["sessionId"] = json!(c.session_id);
+                    body["turnId"] = json!(c.turn_id);
+                    body["callId"] = json!(c.call_id);
+                    body["agent"] = c
+                        .context
+                        .get("agent")
+                        .filter(|v| v.is_string())
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                }
+                body
             }
             Protocol::PrismaAirs { profile } => {
                 let field = if matches!(c.phase, Phase::UserInput | Phase::ToolCall) {

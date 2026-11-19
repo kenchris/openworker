@@ -70,6 +70,7 @@ fn config(endpoint: String, protocol: Protocol) -> Config {
         credential_env: "MOCK_KEY".into(),
         timeout_ms: 500,
         allow_loopback_http: true,
+        include_correlation: false,
     }
 }
 #[tokio::test]
@@ -183,4 +184,38 @@ fn endpoints_do_not_accept_unencrypted_remote_hosts_or_embedded_secrets() {
             Scanner::new(config(url.into(), Protocol::SelectedContext), Arc::new(Key)).is_err()
         );
     }
+}
+
+#[tokio::test]
+async fn selected_context_sends_session_ids_only_when_asked() {
+    let reply = json!({"action":"allow","scanId":"scan-1"}).to_string();
+    // Default: nothing that identifies a session.
+    let (url, server) = mock(200, reply.clone(), 0).await;
+    let scanner = Scanner::new(config(url, Protocol::SelectedContext), Arc::new(Key)).unwrap();
+    scanner
+        .call(context(), CancellationToken::new())
+        .await
+        .unwrap();
+    let request = server.await.unwrap();
+    let body: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    for key in ["sessionId", "turnId", "callId", "agent"] {
+        assert!(body.get(key).is_none(), "{key} must not be sent by default");
+    }
+    // Opt in: the four identifiers, and still nothing else from the context.
+    let (url, server) = mock(200, reply, 0).await;
+    let mut c = config(url, Protocol::SelectedContext);
+    c.include_correlation = true;
+    let scanner = Scanner::new(c, Arc::new(Key)).unwrap();
+    let mut ctx = context();
+    ctx.call_id = Some("call-7".into());
+    ctx.context = json!({"agent":"coder-v1","history":"MUST_NOT_SEND"});
+    scanner.call(ctx, CancellationToken::new()).await.unwrap();
+    let request = server.await.unwrap();
+    assert!(!request.contains("MUST_NOT_SEND"));
+    let body: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(body["sessionId"], "s_one");
+    assert_eq!(body["turnId"], "turn-1");
+    assert_eq!(body["callId"], "call-7");
+    assert_eq!(body["agent"], "coder-v1");
+    assert_eq!(body["text"], "selected text");
 }
