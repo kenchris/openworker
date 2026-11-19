@@ -64,6 +64,10 @@ test(`real child gates content, pauses, restores callbacks and scopes checks (${
   const run=await unavailable.send("hello");const result=await run.result();assert.equal(result.status,"interrupted");assert.equal(result.interruptions[0].kind,"safety");assert.ok(!JSON.stringify(result).includes("private scanner detail"));
   available=true;await unavailable.resumeSafety();assert.equal((await unavailable.resume()).status,"completed");
 
+  // A beforeOutput hook can replace the answer, and the replaced text is what the run returns.
+  const rewriting=await agent.newSession({hooks:[hook.beforeOutput({name:"rewrite",run:()=>({action:"replace",text:"replaced by hook"})})]});
+  const rewritten=await (await rewriting.send("hello")).result();assert.equal(rewritten.status,"completed");assert.equal(rewritten.finalOutput,"replaced by hook");
+
   let cancelled=false;
   const timeout=await agent.newSession({hooks:[hook.beforeModel({name:"timeout",timeoutMs:30,run:({signal})=>new Promise(()=>{signal.addEventListener("abort",()=>{cancelled=true;});})})]});
   const timed=await timeout.send("hello");assert.equal((await timed.result()).interruptions[0].kind,"safety");

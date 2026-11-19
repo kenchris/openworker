@@ -18,7 +18,13 @@ export interface SafetyContext {
 export type HookDecision = { action: "allow" } | {
   action: "block"; code: string; feedbackToModel?: string;
 };
-export type SafetyDecision = HookDecision | { action: "replace"; text: string };
+/**
+ * `beforeInput`, `afterTool` and `beforeOutput` hooks may also return replacement text. The replacement
+ * is checked against the guardrails again, so it cannot bring back a value a guardrail forbids.
+ * Tool arguments (`beforeTool`) and model input (`beforeModel`) stay allow or block.
+ */
+export type TextHookDecision = HookDecision | { action: "replace"; text: string };
+export type SafetyDecision = TextHookDecision;
 export type SafetyHandler = (context: SafetyContext) => SafetyDecision | Promise<SafetyDecision>;
 export type Replacement = (context: SafetyContext) => string | Promise<string>;
 type HandlerRef = { name: string; version: string };
@@ -73,16 +79,16 @@ export const guard = {
   },
   model:(options:RuleOptions&{name:string;model:Model;instructions:string})=>rule(options.name,{type:"model",model:{connection:options.model.provider,model:options.model.name},instructions:options.instructions},options),
 };
-interface HookOptions {name:string;version?:string;tools?:string[];timeoutMs?:number;run:(context:SafetyContext)=>HookDecision|Promise<HookDecision>}
-function makeHook(when:SafetyHook["when"],options:HookOptions):SafetyHook {
+interface HookOptions<D extends SafetyDecision=HookDecision> {name:string;version?:string;tools?:string[];timeoutMs?:number;run:(context:SafetyContext)=>D|Promise<D>}
+function makeHook(when:SafetyHook["when"],options:HookOptions<SafetyDecision>):SafetyHook {
   return {name:options.name,version:options.version??"1",when,tools:options.tools??[],handler:{name:options.name,version:options.version??"1"},timeoutMs:options.timeoutMs??10000,callback:options.run};
 }
 export const hook={
-  beforeInput:(options:HookOptions)=>makeHook("beforeInput",options),
+  beforeInput:(options:HookOptions<TextHookDecision>)=>makeHook("beforeInput",options),
   beforeModel:(options:HookOptions)=>makeHook("beforeModel",options),
   beforeTool:(options:HookOptions)=>makeHook("beforeTool",options),
-  afterTool:(options:HookOptions)=>makeHook("afterTool",options),
-  beforeOutput:(options:HookOptions)=>makeHook("beforeOutput",options),
+  afterTool:(options:HookOptions<TextHookDecision>)=>makeHook("afterTool",options),
+  beforeOutput:(options:HookOptions<TextHookDecision>)=>makeHook("beforeOutput",options),
   onEvent:(options:Omit<HookOptions,"run">&{run:(context:SafetyContext)=>void|Promise<void>})=>makeHook("onEvent",{...options,run:async c=>{await options.run(c);return {action:"allow"};}}),
 };
 
