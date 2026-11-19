@@ -148,6 +148,23 @@ Treat callback input as sensitive; do not copy it into diagnostics or reason cod
 | Assistant text | Buffer protected text. Reject the candidate and use bounded regeneration from accepted history plus safe feedback. |
 | Required check unavailable | Fail closed; active work parks with a safety interruption. Restore the handler/service, then explicitly resume. |
 
+## Limits to design for
+
+These come from the runtime source and from runs against `0.1.0-beta.5`. Each one
+ends as an unavailable check unless it says otherwise, so the run parks until you
+resume it.
+
+| Limit | Value |
+|---|---|
+| Hook and callback time | `timeoutMs` defaults to 10 000 and can be set from 1 to 120 000. A check that is still running at the limit is unavailable, and its `signal` is aborted. |
+| Text size | 128 000 bytes per checked text. A tool result is checked as its whole JSON, so a large file read can go over it. The model then receives `GUARDRAIL_UNAVAILABLE` with "The tool ran, but its result could not be inspected. Do not repeat the action." The tool has already run. |
+| Concurrent callbacks | 64 safety callbacks can be pending in one host. The 65th is refused with "Safety callback capacity exceeded". |
+| Repeated calls | A `beforeTool` hook runs when the model's call arrives and again just before dispatch, so it runs at least twice per call. It must give the same answer both times. Cancellation, reconnect and revalidation can run any blocking hook again. |
+| Image and PDF attachments | If any user-input or model-input check is configured (a `userInput` guardrail, a `beforeInput` hook or a `beforeModel` hook), a turn with an image or PDF attachment is refused. A text-only check cannot inspect them, so the runtime fails closed. Plain text files are checked as text. |
+| Tool names | `tools` selectors and `context.tool` use the name the runtime registered. The coding tools appear as `coding.run_shell`, `coding.read_file` and so on. A tool from an MCP server is named `server.tool`. |
+| Shell on Windows and macOS | Managed coding processes need Linux. `coding.run_shell` and `coding.process_start` return "Managed coding processes currently require Linux" elsewhere, so a guardrail on them can be tested for blocking but not for execution. |
+| External scanners | `registerSecurityAdapter` needs a build with the `security-adapters` Cargo feature. The npm runtime reports it as `capabilities.security_adapters`. |
+
 ```typescript
 await session.resumeSafety();
 const result = await session.resume();
