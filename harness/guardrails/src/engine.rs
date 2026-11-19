@@ -236,34 +236,8 @@ pub async fn apply(
     }
     // A later custom replacement must never reintroduce an earlier prohibited
     // value. Revalidate without applying transforms/callback effects again.
-    if transformed {
-        context.text = out.text.clone();
-        context.matches.clear();
-        for rule in &rules {
-            let started = Instant::now();
-            let matches = match detect(rule, &context, models, &cancel).await {
-                Ok(m) => m,
-                Err(_) => {
-                    out.findings
-                        .push(unavailable(&context, &rule.name, &rule.version));
-                    out.unavailable = true;
-                    return Ok(out);
-                }
-            };
-            if !matches.is_empty() {
-                out.findings.push(finding(
-                    &context,
-                    &rule.name,
-                    &rule.version,
-                    "blocked",
-                    Some("SANITIZATION_INCOMPLETE".into()),
-                    matches.len(),
-                    started,
-                ));
-                reject(&mut out, Decision::block("SANITIZATION_INCOMPLETE"));
-                return Ok(out);
-            }
-        }
+    if transformed && !recheck(&rules, models, &mut context, &cancel, &mut out).await {
+        return Ok(out);
     }
     context.text = out.text.clone();
     context.matches.clear();
@@ -273,6 +247,7 @@ pub async fn apply(
                 .map_err(|_| anyhow::anyhow!("Sanitized tool arguments are not valid JSON"))?,
         );
     }
+    let mut replaced = false;
     for hook in config.hooks.iter().filter(|h| {
         h.when != HookPhase::OnEvent
             && h.when.applies(context.phase)
@@ -317,6 +292,26 @@ pub async fn apply(
                 reject(&mut out, decision);
                 return Ok(out);
             }
+            // A hook may replace text where the runtime already accepts changed
+            // text from a guardrail: user input, model output and tool results.
+            // Tool arguments and model input stay allow-or-block.
+            Ok(Decision::Replace { text })
+                if hook_may_replace(context.phase) && text.len() <= MAX_TEXT =>
+            {
+                out.text = text;
+                context.text = out.text.clone();
+                context.matches.clear();
+                replaced = true;
+                out.findings.push(finding(
+                    &context,
+                    &hook.name,
+                    &hook.version,
+                    "redacted",
+                    None,
+                    0,
+                    started,
+                ));
+            }
             _ => {
                 out.findings
                     .push(unavailable(&context, &hook.name, &hook.version));
@@ -325,7 +320,56 @@ pub async fn apply(
             }
         }
     }
+    // A hook's replacement is held to the same rule as a guardrail's: it must not
+    // bring back a value that a guardrail forbids.
+    if replaced && !recheck(&rules, models, &mut context, &cancel, &mut out).await {
+        return Ok(out);
+    }
     Ok(out)
+}
+fn hook_may_replace(phase: Phase) -> bool {
+    matches!(
+        phase,
+        Phase::UserInput | Phase::ModelOutput | Phase::ToolResult
+    )
+}
+/// Checks the final text against every rule again. Returns false when `out`
+/// is final because a rule could not run or still matches.
+async fn recheck(
+    rules: &[&Rule],
+    models: Option<&dyn ModelDetector>,
+    context: &mut Context,
+    cancel: &CancellationToken,
+    out: &mut Evaluation,
+) -> bool {
+    context.text = out.text.clone();
+    context.matches.clear();
+    for rule in rules {
+        let started = Instant::now();
+        let matches = match detect(rule, context, models, cancel).await {
+            Ok(m) => m,
+            Err(_) => {
+                out.findings
+                    .push(unavailable(context, &rule.name, &rule.version));
+                out.unavailable = true;
+                return false;
+            }
+        };
+        if !matches.is_empty() {
+            out.findings.push(finding(
+                context,
+                &rule.name,
+                &rule.version,
+                "blocked",
+                Some("SANITIZATION_INCOMPLETE".into()),
+                matches.len(),
+                started,
+            ));
+            reject(out, Decision::block("SANITIZATION_INCOMPLETE"));
+            return false;
+        }
+    }
+    true
 }
 /// Observer failure is diagnostic, never authority. Caller queues/persists this
 /// outside the action path; the action's original outcome remains unchanged.

@@ -95,7 +95,12 @@ from your application to evaluate it.
 ## Hooks and custom replacements
 
 Guardrails transform text first. Blocking hooks inspect the resulting candidate
-and return allow/block. They cannot edit a candidate after validation.
+and return allow/block. `beforeInput`, `afterTool` and `beforeOutput` hooks can
+also return `{ action: "replace", text }`. The replacement is checked against the
+guardrails again, and a guardrail that still matches blocks it with
+`SANITIZATION_INCOMPLETE`. A later hook sees the replaced text. `beforeTool` and
+`beforeModel` hooks stay allow/block, because a changed tool call or model request
+would no longer be the one the model asked for.
 
 ```typescript
 const session = await agent.newSession({

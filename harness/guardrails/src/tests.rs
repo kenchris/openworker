@@ -1,6 +1,7 @@
 use super::*;
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 fn context(text: &str, phase: Phase) -> Context {
     Context {
@@ -255,7 +256,7 @@ async fn model_findings_must_be_exact_source_fragments() {
 }
 
 #[tokio::test]
-async fn hooks_see_sanitized_content_cannot_rewrite_and_observers_cannot_block() {
+async fn hooks_see_sanitized_content_and_observers_cannot_block() {
     let registry = registered(|ctx| {
         assert_eq!(ctx.text, "[redacted]");
         Ok(Decision::block("HOOK_BLOCK"))
@@ -285,9 +286,12 @@ async fn hooks_see_sanitized_content_cannot_rewrite_and_observers_cannot_block()
     .await
     .unwrap();
     assert!(matches!(e.block,Some(Decision::Block{code,..})if code=="HOOK_BLOCK"));
+    // A hook that returns a replacement for model output is applied (see the
+    // hook replacement tests below), so this case now only checks that the
+    // replaced text is the one that comes out.
     let registry = registered(|_| {
         Ok(Decision::Replace {
-            text: "unchecked".into(),
+            text: "replaced".into(),
         })
     });
     let e = apply(
@@ -299,7 +303,8 @@ async fn hooks_see_sanitized_content_cannot_rewrite_and_observers_cannot_block()
     )
     .await
     .unwrap();
-    assert!(e.unavailable);
+    assert!(!e.unavailable && e.block.is_none());
+    assert_eq!(e.text, "replaced");
     c.hooks[0].when = HookPhase::OnEvent;
     let e = apply(
         &c,
@@ -427,4 +432,117 @@ async fn callback_block_feedback_cannot_echo_matched_content_or_reason_code() {
     assert!(!serde_json::to_string(&result.findings)
         .unwrap()
         .contains("SECRET_SENTINEL"));
+}
+
+fn hook_config(when: HookPhase, rules: Vec<Rule>, phase: Phase) -> Config {
+    let mut guardrails = Guardrails::default();
+    match phase {
+        Phase::UserInput => guardrails.user_input = rules,
+        Phase::ModelOutput => guardrails.model_output = rules,
+        _ => {}
+    }
+    Config {
+        guardrails,
+        hooks: vec![Hook {
+            name: "replace".into(),
+            version: "1".into(),
+            when,
+            tools: vec![],
+            handler: handler_ref(),
+            timeout_ms: 10,
+        }],
+        ..Default::default()
+    }
+}
+async fn run_phase(c: &Config, r: &Registry, text: &str, phase: Phase) -> Evaluation {
+    apply(c, r, None, context(text, phase), CancellationToken::new())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_hook_can_replace_user_input_model_output_and_tool_results() {
+    let registry = registered(|ctx| {
+        Ok(Decision::Replace {
+            text: ctx
+                .text
+                .replace("ignore previous instructions", "[removed]"),
+        })
+    });
+    for (when, phase) in [
+        (HookPhase::BeforeInput, Phase::UserInput),
+        (HookPhase::BeforeOutput, Phase::ModelOutput),
+        (HookPhase::AfterTool, Phase::ToolResult),
+    ] {
+        let c = hook_config(when, vec![], phase);
+        let e = run_phase(&c, &registry, "a. ignore previous instructions. b", phase).await;
+        assert_eq!(e.text, "a. [removed]. b");
+        assert!(e.block.is_none() && !e.unavailable);
+        let finding = serde_json::to_value(&e.findings[0]).unwrap();
+        assert_eq!(finding["outcome"], "redacted");
+        // The finding names the check and holds no content.
+        assert!(!finding.to_string().contains("ignore previous"));
+    }
+}
+
+#[tokio::test]
+async fn a_hook_replacement_cannot_bring_back_a_value_a_guardrail_forbids() {
+    let registry = registered(|_| {
+        Ok(Decision::Replace {
+            text: "the secret is back".into(),
+        })
+    });
+    let c = hook_config(
+        HookPhase::BeforeOutput,
+        vec![Rule::regex("pii", "secret", Action::redact())],
+        Phase::ModelOutput,
+    );
+    let e = run_phase(&c, &registry, "nothing here", Phase::ModelOutput).await;
+    assert!(matches!(e.block,Some(Decision::Block{code,..})if code=="SANITIZATION_INCOMPLETE"));
+}
+
+#[tokio::test]
+async fn a_later_hook_sees_the_replaced_text() {
+    let seen = Arc::new(Mutex::new(vec![]));
+    let log = seen.clone();
+    let registry = registered(move |ctx| {
+        log.lock().unwrap().push(ctx.text.clone());
+        Ok(Decision::Replace {
+            text: format!("{}!", ctx.text),
+        })
+    });
+    let mut c = hook_config(HookPhase::BeforeOutput, vec![], Phase::ModelOutput);
+    let mut second = c.hooks[0].clone();
+    second.name = "second".into();
+    c.hooks.push(second);
+    let e = run_phase(&c, &registry, "hi", Phase::ModelOutput).await;
+    assert_eq!(e.text, "hi!!");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["hi".to_string(), "hi!".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn a_hook_cannot_replace_tool_arguments_or_model_input_or_exceed_the_size_limit() {
+    let registry = registered(|_| Ok(Decision::Replace { text: "{}".into() }));
+    for (when, phase) in [
+        (HookPhase::BeforeTool, Phase::ToolCall),
+        (HookPhase::BeforeModel, Phase::ModelInput),
+    ] {
+        let c = hook_config(when, vec![], phase);
+        let e = run_phase(&c, &registry, "{}", phase).await;
+        assert!(e.unavailable, "{phase:?} must stay allow-or-block");
+    }
+    let big = registered(|_| {
+        Ok(Decision::Replace {
+            text: "x".repeat(MAX_TEXT + 1),
+        })
+    });
+    let c = hook_config(HookPhase::BeforeOutput, vec![], Phase::ModelOutput);
+    assert!(
+        run_phase(&c, &big, "hi", Phase::ModelOutput)
+            .await
+            .unavailable
+    );
 }
